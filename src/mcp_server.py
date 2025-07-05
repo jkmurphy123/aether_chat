@@ -64,7 +64,7 @@ class MCPServerManager:
         self.genai_callable_tools_map = {}
 
         @mcp.tool()
-        async def _display_message(message: str) -> str:
+        def _display_message(message: str) -> str:
             """
             Displays a text message on this Raspberry Pi's HDMI screen.
 
@@ -80,7 +80,7 @@ class MCPServerManager:
 
 
         @mcp.tool()
-        async def _send_chat_message_to_other_pi(
+        def _send_chat_message_to_other_pi(
             target_pi_id: Literal["pi1", "pi2"],
             message: str
         ) -> str:
@@ -105,7 +105,7 @@ class MCPServerManager:
 
 
         @mcp.tool()
-        async def _get_pi_status(query_pi_id: Literal["self", "other"]) -> dict:
+        def _get_pi_status(query_pi_id: Literal["self", "other"]) -> dict:
             """
             Retrieves the current status of this Pi or the other Pi.
 
@@ -131,7 +131,7 @@ class MCPServerManager:
 
 
         @mcp.tool()
-        async def _broadcast_chat_topic(topic: str) -> str:
+        def _broadcast_chat_topic(topic: str) -> str:
             """
             Broadcasts the current conversation topic to all connected Raspberry Pis.
             This helps align context across devices.

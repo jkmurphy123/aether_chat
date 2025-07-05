@@ -34,7 +34,7 @@ elif THIS_PI_ID is None:
 IDLE_MODE_MIN_DURATION_SEC = 30   # Reduced for quicker testing (originally 300)
 IDLE_MODE_MAX_DURATION_SEC = 60   # Reduced for quicker testing (originally 1800)
 CHAT_MODE_MIN_DURATION_SEC = 60   # Reduced for quicker testing (originally 60)
-CHAT_MODE_MAX_DURATION_SEC = 180   # Reduced for quicker testing (originally 600)
+CHAT_MODE_MAX_DURATION_SEC = 600   # Reduced for quicker testing (originally 600)
 
 # Timeout for other Pi's status to be considered online (heartbeat interval is 5s)
 OTHER_PI_STATUS_TIMEOUT_SEC = 120 # If no heartbeat for 20s, assume offline (originally 120)
@@ -296,7 +296,8 @@ class ChatPiApp:
                         print(f"[{self.pi_id}] LLM requested tool call: {tool_name} with args {tool_args}")
                         
                         registered_tool_func = self.mcp_server_manager.mcp.get_tool_function(tool_name)
-                        if registered_tool_func:
+                        if tool_name in self.mcp_server_manager.genai_callable_tools_map:
+                            registered_tool_func = self.mcp_server_manager.genai_callable_tools_map[tool_name]
                             tool_output = await registered_tool_func(**tool_args)
                             print(f"[{self.pi_id}] Tool '{tool_name}' executed. Output: {tool_output}")
                             self.chat_history.append(

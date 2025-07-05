@@ -61,7 +61,7 @@ class GeminiLLMInterface:
             ]
 
             # Now call generate_content with 'config' and 'safety_settings' as top-level arguments
-            response = await self.client.models.generate_content(
+            response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=messages_history,
                 config=config_obj, # Pass the GenerateContentConfig object as 'config'
