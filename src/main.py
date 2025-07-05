@@ -18,7 +18,7 @@ from google.genai.types import Content, Part
 
 
 # --- Configuration Constants ---
-BROKER_IP = "127.0.0.1" # <<< IMPORTANT: SET THIS TO YOUR MOSQUITTO BROKER'S IP ADDRESS
+BROKER_IP = "192.168.40.185" # <<< IMPORTANT: SET THIS TO YOUR MOSQUITTO BROKER'S IP ADDRESS
                        # For local Windows testing: "127.0.0.1"
                        # For Pi to Pi: IP of the Pi running Mosquitto (e.g., "192.168.1.100")
 MQTT_PORT = 1883
