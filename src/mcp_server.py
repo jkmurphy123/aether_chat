@@ -2,6 +2,7 @@ import asyncio
 from mcp.server.fastmcp import FastMCP
 from typing import Literal
 import time
+import sys # For parsing args in __main__ for mcp dev
 
 # --- Mock objects for independent testing (remain the same) ---
 class MockDisplayManager:
@@ -26,54 +27,61 @@ class MockMQTTClient:
     def is_other_pi_online(self, other_pi_id: str) -> bool:
         return self.online_status.get(other_pi_id, (0, False))[1]
 
-# --- Create mock instances globally for testing with mcp dev ---
-_mock_display = MockDisplayManager()
-_mock_mqtt = MockMQTTClient()
+# --- Global FastMCP instance definition (adjusted) ---
+# This part handles how 'mcp dev' finds the server.
+# The 'mcp' object is created here and will be passed into MCPServerManager.
+# We determine the pi_id for naming before creating the global 'mcp' object.
+_default_pi_id_for_global_mcp = "pi1"
+_temp_pi_id_for_global_mcp = _default_pi_id_for_global_mcp
 
+# Parse arguments ONLY if this script is being run directly.
+# mcp dev typically passes the args after the script.
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        _temp_pi_id_for_global_mcp = sys.argv[1]
 
-# --- Define the global FastMCP instance ( conditionally based on arguments for mcp dev) ---
-# This needs to be set up so mcp dev can find it.
-
-# Default PI ID for standalone run or if mcp dev doesn't provide args
-_default_pi_id_for_dev_test = "pi1"
-
-# The 'mcp dev' command can pass arguments via '--args'.
-# We need to parse sys.argv to get the PI_ID if provided by mcp dev.
-import sys
-# Check if running from mcp dev with --args. sys.argv[0] is the script name.
-# The first arg after script name would be the pi_id.
-# This assumes mcp dev passes it cleanly.
-if len(sys.argv) > 1 and sys.argv[0].endswith('mcp_server.py'): # Basic check if running this script directly or via mcp dev
-    # This might be tricky as mcp dev might pass args differently.
-    # A safer approach is to define mcp later after we know the pi_id
-    pass # We'll define 'mcp' after parsing args below
+# Define the global 'mcp' instance here.
+# This instance will be decorated with tools.
+mcp = FastMCP(
+    name=f"pi-chatbot-{_temp_pi_id_for_global_mcp}-server",
+    instructions=(
+        f"This server controls Raspberry Pi {_temp_pi_id_for_global_mcp}. "
+        "It can display messages on its HDMI screen and send messages to another Pi "
+        "via MQTT. It can also provide status about its operational mode and the "
+        "current conversation topic."
+    )
+)
 
 class MCPServerManager:
     def __init__(self, pi_id: str, display_manager, mqtt_client):
         """
         Initializes the MCP server for this Raspberry Pi.
-        This class is still useful for encapsulating the tools and state management
-        within your main application loop.
+
+        Args:
+            pi_id (str): The unique ID of this Pi (e.g., "pi1", "pi2").
+            display_manager (DisplayManager): An instance of your DisplayManager.
+            mqtt_client (MQTTClient): An instance of your MQTTClient.
         """
         self.pi_id = pi_id
         self.display_manager = display_manager
         self.mqtt_client = mqtt_client
         
-        # When MCPServerManager is instantiated (likely in main.py),
-        # it will register its tools with the global `mcp` instance.
-        # The tools will "close over" the real display_manager and mqtt_client.
+        # --- CRITICAL FIX: Store the global 'mcp' instance as an attribute ---
+        self.mcp = mcp
+        # --- END CRITICAL FIX ---
+
+        # Register tools with this specific manager's context (real display/mqtt clients)
+        # Note: The @mcp.tool decorator already registers with the global `mcp` instance.
+        # This call primarily sets up the closures for the tools with the correct
+        # display_manager and mqtt_client instances that are passed to this constructor.
         self._register_tools(self.pi_id, self.display_manager, self.mqtt_client)
         print(f"MCP Server for Pi '{self.pi_id}' (managed by MCPServerManager) initialized with tools.")
 
-
     def _register_tools(self, pi_id, display_manager, mqtt_client):
         """Registers all the tools that the LLM can call using the global 'mcp' instance."""
-        # Clear existing tools to avoid duplicates if this is called multiple times
-        # though FastMCP might handle this internally or it's not strictly necessary.
-        # This explicit re-registration is mainly for the mcp dev scenario.
-        # In a real app, tools might be registered once at global scope or on init.
-        # FastMCP's @tool decorator registers directly to the mcp instance it's called on.
-        # If mcp is already defined globally, subsequent @mcp.tool() calls will add to it.
+        # The @mcp.tool decorators below register tools to the global `mcp` instance.
+        # The inner functions close over the pi_id, display_manager, and mqtt_client
+        # provided at the time MCPServerManager is instantiated.
 
         @mcp.tool()
         async def display_message(message: str) -> str:
@@ -124,6 +132,7 @@ class MCPServerManager:
                       For 'other', it will indicate if the other Pi is detected as online.
             """
             status = {"pi_id": pi_id}
+            # These will need to be populated by the main application's current state
             status['mode'] = "unknown" # Placeholder
             status['online'] = True # Placeholder (this pi is always online if server is running)
 
@@ -153,38 +162,18 @@ class MCPServerManager:
             return "Chat topic broadcasted."
 
     def run_server(self):
-        """Runs the MCP server using the stdio transport."""
-        print(f"Starting MCP server '{mcp.name}' with stdio transport...")
-        # This will call the global 'mcp' instance's run method
-        mcp.run(transport='stdio')
-        print(f"MCP server '{mcp.name}' stopped.")
+        """
+        Runs the MCP server using the stdio transport.
+        Note: This blocks. In main.py, you'd typically run this in a separate thread/task.
+        """
+        print(f"Starting MCP server '{self.mcp.name}' with stdio transport...")
+        self.mcp.run(transport='stdio')
+        print(f"MCP server '{self.mcp.name}' stopped.")
 
-# --- Handling for `mcp dev` and direct execution ---
-# This block handles how the global 'mcp' object is created.
-# It checks if an argument (presumably the pi_id) is passed.
-_temp_pi_id_for_global_mcp = _default_pi_id_for_dev_test
-
-if __name__ == "__main__":
-    # When running directly: python src/mcp_server.py pi1
-    # sys.argv will be ['src/mcp_server.py', 'pi1']
-    if len(sys.argv) > 1:
-        _temp_pi_id_for_global_mcp = sys.argv[1]
-
-# Now, define the global 'mcp' instance *after* we've determined the pi_id
-mcp = FastMCP(
-    name=f"pi-chatbot-{_temp_pi_id_for_global_mcp}-server",
-    instructions=(
-        f"This server controls Raspberry Pi {_temp_pi_id_for_global_mcp}. "
-        "It can display messages on its HDMI screen and send messages to another Pi "
-        "via MQTT. It can also provide status about its operational mode and the "
-        "current conversation topic."
-    )
-)
-
-# Instantiate MCPServerManager once to register tools with the global `mcp` instance
-# using the mock objects for dev testing.
-# This ensures that when 'mcp dev' imports this file, the 'mcp' object is fully
-# configured with tools.
+# --- Handling for `mcp dev` and direct execution (remains the same) ---
+# This block ensures the global 'mcp' instance is created correctly
+# when the file is imported by `mcp dev` or run directly.
+# The _mcp_instance_for_dev_test is created just to ensure tools are registered.
 _mcp_instance_for_dev_test = MCPServerManager(
     pi_id=_temp_pi_id_for_global_mcp,
     display_manager=_mock_display,
@@ -197,10 +186,3 @@ print(f"  mcp dev src/mcp_server.py:mcp --args {_temp_pi_id_for_global_mcp}")
 print("   (Replace 'pi1' or 'pi2' if you are trying different IDs.)")
 print("Or configure Claude Desktop to connect to this server.")
 print("Press Ctrl+C to stop this terminal if you ran it via python directly.")
-
-# If you run this script directly (e.g., `python src/mcp_server.py`),
-# it will simply set up the global 'mcp' instance and register tools.
-# The 'mcp.run()' call will be handled by the 'mcp dev' command when it imports this module.
-# If you wanted to run the server directly from `python src/mcp_server.py`,
-# you would add `mcp.run(transport='stdio')` to the `if __name__ == "__main__":` block,
-# but 'mcp dev' is the preferred way for inspection.

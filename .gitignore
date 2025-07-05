@@ -1,3 +1,8 @@
 .env
 .venv
 src/__pycache__/mcp_server.cpython-310.pyc
+src/__pycache__/__init__.cpython-310.pyc
+src/__pycache__/display_manager.cpython-310.pyc
+src/__pycache__/llm_interface.cpython-310.pyc
+src/__pycache__/main.cpython-310.pyc
+src/__pycache__/mqtt_client.cpython-310.pyc
