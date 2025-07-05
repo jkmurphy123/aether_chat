@@ -8,34 +8,36 @@ import sys
 from .display_manager import DisplayManager
 from .mqtt_client import MQTTClient
 from .llm_interface import GeminiLLMInterface
-# Import the MCPServerManager class and the global 'mcp' object
-from .mcp_server import MCPServerManager, mcp 
-from google import genai
-from google.genai.types import (
-    GenerateContentConfig,
-    FunctionCallingConfig,
-    HarmCategory,
-    HarmBlockThreshold,
-    Content, # Re-import Content if not already
-    Part     # Re-import Part if not already
-)
+# Only import the MCPServerManager class. The 'mcp' object is now managed within it.
+from .mcp_server import MCPServerManager 
+
+
+# Imports for Gemini types (needed for constructing messages and tool responses)
+# These come from google.generativeai.types
+from google.genai.types import Content, Part
 
 
 # --- Configuration Constants ---
-# You can define these in a separate config.py or use environment variables
-# For simplicity, we'll put them here for now.
-BROKER_IP = "192.168.40.185" # <<< IMPORTANT: REPLACE WITH YOUR BROKER IP
+BROKER_IP = "127.0.0.1" # <<< IMPORTANT: SET THIS TO YOUR MOSQUITTO BROKER'S IP ADDRESS
+                       # For local Windows testing: "127.0.0.1"
+                       # For Pi to Pi: IP of the Pi running Mosquitto (e.g., "192.168.1.100")
 MQTT_PORT = 1883
-# Make sure to set this for each Pi: "pi1" on one, "pi2" on the other
-THIS_PI_ID = os.getenv("PI_ID", "pi1") # Use environment variable or default to "pi1"
 
-IDLE_MODE_MIN_DURATION_SEC = 30  # 5 minutes
-IDLE_MODE_MAX_DURATION_SEC = 60 # 30 minutes
-CHAT_MODE_MIN_DURATION_SEC = 60   # 1 minute
-CHAT_MODE_MAX_DURATION_SEC = 300  # 10 minutes
+# Make sure to set this for each Pi: "pi1" on one, "pi2" on the other.
+# It prioritizes environment variable, then command line arg, then defaults.
+THIS_PI_ID = os.getenv("PI_ID", None) # Default to None first, then check sys.argv
+if THIS_PI_ID is None and len(sys.argv) > 1:
+    THIS_PI_ID = sys.argv[1]
+elif THIS_PI_ID is None:
+    THIS_PI_ID = "pi1" # Final fallback if no env var and no arg
 
-# Timeout for other Pi's status to be considered online
-OTHER_PI_STATUS_TIMEOUT_SEC = 120 # 2 minutes
+IDLE_MODE_MIN_DURATION_SEC = 30   # Reduced for quicker testing (originally 300)
+IDLE_MODE_MAX_DURATION_SEC = 60   # Reduced for quicker testing (originally 1800)
+CHAT_MODE_MIN_DURATION_SEC = 20   # Reduced for quicker testing (originally 60)
+CHAT_MODE_MAX_DURATION_SEC = 60   # Reduced for quicker testing (originally 600)
+
+# Timeout for other Pi's status to be considered online (heartbeat interval is 5s)
+OTHER_PI_STATUS_TIMEOUT_SEC = 20 # If no heartbeat for 20s, assume offline (originally 120)
 
 # Predefined screensaver messages (you can make this more dynamic later)
 SCREENSAVER_MESSAGES = [
@@ -73,7 +75,8 @@ class ChatPiApp:
         )
         self.llm_interface = GeminiLLMInterface()
 
-        # Initialize the MCP Server Manager, passing the real dependencies
+        # Initialize the MCP Server Manager, passing the real dependencies.
+        # The `mcp` instance is now an attribute of `mcp_server_manager`.
         self.mcp_server_manager = MCPServerManager(
             pi_id=self.pi_id,
             display_manager=self.display_manager,
@@ -93,17 +96,17 @@ class ChatPiApp:
     async def _handle_incoming_chat_message(self, message: str):
         """Callback for MQTTClient to put messages into the queue."""
         await self.incoming_chat_queue.put(message)
-        print(f"Queued incoming message: {message[:50]}...")
+        print(f"[{self.pi_id}] Queued incoming message: {message[:50]}...")
 
     async def _process_incoming_messages(self):
         """Asynchronously process messages from the queue."""
         while True:
             message = await self.incoming_chat_queue.get()
-            print(f"[MainApp] Processing MQTT message: {message[:50]}...")
+            print(f"[{self.pi_id}] Processing MQTT message: {message[:50]}...")
 
             if self.mode == "IDLE":
                 # If in idle mode, receiving a message means the other Pi is initiating
-                print(f"[MainApp] Received message in IDLE mode. Switching to CHAT mode.")
+                print(f"[{self.pi_id}] Received message in IDLE mode. Switching to CHAT mode.")
                 await self.enter_chat_mode(initiating=False, received_message=message)
             elif self.mode == "CHAT":
                 # If in chat mode, feed the message to the LLM
@@ -127,15 +130,22 @@ class ChatPiApp:
         self.chat_history = [] # Clear chat history
         self.current_chat_topic = ""
         self.display_manager.clear_screen() # Clear chat messages
-        self.mqtt_client.publish_current_chat_topic("") # Clear topic broadcast
+        self.mqtt_client.publish_current_chat_topic("") # Clear topic broadcast (empty string means no topic)
 
-        # Start screensaver task
-        asyncio.create_task(self.run_screensaver())
+        # Start screensaver task (ensure it's not started multiple times)
+        # Check if there's already an active screensaver task
+        if not hasattr(self, '_screensaver_task') or self._screensaver_task.done():
+            self._screensaver_task = asyncio.create_task(self.run_screensaver())
 
         # Set a timer to potentially switch to chat mode
         idle_duration = random.randint(IDLE_MODE_MIN_DURATION_SEC, IDLE_MODE_MAX_DURATION_SEC)
         print(f"[{self.pi_id}] Staying in IDLE mode for {idle_duration} seconds.")
-        await asyncio.sleep(idle_duration) # Wait for idle duration
+        
+        try:
+            await asyncio.sleep(idle_duration) # Wait for idle duration
+        except asyncio.CancelledError:
+            print(f"[{self.pi_id}] IDLE mode sleep cancelled.")
+            return # Exit if cancelled (e.g., by immediate chat initiation)
 
         # After idle duration, try to initiate chat
         print(f"[{self.pi_id}] IDLE mode timer expired. Attempting to enter CHAT mode.")
@@ -149,8 +159,16 @@ class ChatPiApp:
         # Check if the other Pi is online before starting a chat
         if not self.mqtt_client.is_other_pi_online(self.chat_partner_id, max_age_seconds=OTHER_PI_STATUS_TIMEOUT_SEC):
             print(f"[{self.pi_id}] Other Pi ({self.chat_partner_id}) is offline. Cannot start chat. Returning to IDLE.")
+            # If a screensaver task exists and is not done, cancel it before re-entering idle
+            if hasattr(self, '_screensaver_task') and not self._screensaver_task.done():
+                self._screensaver_task.cancel()
             await self.enter_idle_mode() # Re-enter idle if partner not found
             return
+        
+        # If there's an active screensaver task, cancel it.
+        if hasattr(self, '_screensaver_task') and not self._screensaver_task.done():
+            self._screensaver_task.cancel()
+            await asyncio.sleep(0.1) # Give it a moment to cancel
 
         self.mode = "CHAT"
         self.display_manager.clear_screen() # Clear screensaver
@@ -165,40 +183,46 @@ class ChatPiApp:
         if initiating:
             # Step 1: Pi A decides to start a new chat
             self.display_manager.display_message(f"[{self.pi_id}] Initiating chat...")
-            # Generate a random topic
-            self.current_chat_topic = random.choice(PREDEFINED_CHAT_TOPICS) # Or use LLM to generate:
-            # self.current_chat_topic = await self.llm_interface.generate_response("Generate a unique and interesting topic for two AI's to discuss (short and to the point).")
+            self.current_chat_topic = random.choice(PREDEFINED_CHAT_TOPICS)
             
             print(f"[{self.pi_id}] Chat topic: {self.current_chat_topic}")
             self.mqtt_client.publish_current_chat_topic(self.current_chat_topic)
 
-            initial_prompt = (
+            initial_prompt_text = (
                 f"You are an autonomous Raspberry Pi chatbot with ID '{self.pi_id}'. "
                 f"You are starting a conversation with another autonomous Raspberry Pi chatbot "
                 f"with ID '{self.chat_partner_id}'. The topic is: '{self.current_chat_topic}'. "
                 "Begin the conversation with an engaging opening statement, keeping it concise. "
                 "Use the 'send_chat_message_to_other_pi' tool to send your opening message to the other Pi."
             )
-            await self._chat_turn(initial_prompt, role="system") # Use system role for initial setup
+            # Pass raw text, _chat_turn will convert it to Part objects.
+            await self._chat_turn(initial_prompt_text, role="system") 
             
         else: # Responding to an incoming message while in IDLE
             self.display_manager.display_message(f"[{self.pi_id}] Responding to chat...")
             print(f"[{self.pi_id}] Received initial message: {received_message}")
-            # If responding, assume the other Pi already broadcasted topic (or infer)
-            # For simplicity, we might need a way to get the topic from the other Pi via MQTT if not broadcasted
-            # For now, let's assume the other Pi will broadcast its topic or LLM can infer.
-            self.current_chat_topic = self.mqtt_client.get_other_pi_topic(self.chat_partner_id) # Need to implement this in MQTTClient
-            if not self.current_chat_topic:
-                 # Fallback if topic not explicitly received, perhaps infer or use a generic one
-                 self.current_chat_topic = "general conversation" 
-                 print(f"[{self.pi_id}] Could not retrieve topic from partner, defaulting to '{self.current_chat_topic}'.")
+            
+            # --- TODO: Implement `get_other_pi_topic` in MQTTClient to retrieve topic ---
+            # For now, if responding, assume the other Pi has broadcasted its topic or infer.
+            # You'll need to modify mqtt_client.py to store received topics and provide a getter.
+            self.current_chat_topic = "general conversation" # Fallback
+            # Example: self.current_chat_topic = self.mqtt_client.get_current_topic_from(self.chat_partner_id)
+            # --- END TODO ---
+
+            print(f"[{self.pi_id}] Current topic (inferred/default): {self.current_chat_topic}")
 
             # Feed the received message to the LLM to generate a response
-            await self._chat_turn(received_message, role="user") # Treat as a user message from other Pi
+            # Pass raw text, _chat_turn will convert it to Part objects.
+            await self._chat_turn(received_message, role="user") 
 
     async def _chat_timer(self, duration: int):
         """Manages the duration of the CHAT mode."""
-        await asyncio.sleep(duration)
+        try:
+            await asyncio.sleep(duration)
+        except asyncio.CancelledError:
+            print(f"[{self.pi_id}] CHAT mode timer cancelled.")
+            return # Exit if cancelled (e.g., by shutdown)
+
         print(f"[{self.pi_id}] CHAT mode timer expired. Returning to IDLE mode.")
         # Send a polite goodbye message before returning to idle
         try:
@@ -207,15 +231,14 @@ class ChatPiApp:
                 "about '{self.current_chat_topic}' is concluding. Send a brief, polite "
                 "farewell message to them using the 'send_chat_message_to_other_pi' tool."
             )
-            response = await self.llm_interface.generate_response(goodbye_message_prompt)
-            # Assuming LLM will call send_chat_message_to_other_pi
-            # If LLM doesn't call tool, you might send a default farewell message here.
+            # Use a dummy role or new role if it's not a user/system prompt
+            await self._chat_turn(goodbye_message_prompt, role="system_farewell")
         except Exception as e:
-            print(f"Error sending farewell message: {e}")
+            print(f"[{self.pi_id}] Error sending farewell message: {e}")
         
         await self.enter_idle_mode()
 
-    async def _chat_turn(self, incoming_message: str, role: str = "user"):
+    async def _chat_turn(self, incoming_message_text: str, role: str = "user"):
         """Manages a single turn of the conversation with the LLM."""
         if self.is_chatting_with_llm:
             print(f"[{self.pi_id}] LLM is currently busy, skipping turn.")
@@ -224,65 +247,52 @@ class ChatPiApp:
         self.is_chatting_with_llm = True
         self.display_manager.display_message(f"[{self.pi_id}] Thinking...", font_size=40)
 
-        # Add incoming message to history
-        if role == "system":
-            pass
-        elif role == "user":
-            self.chat_history.append({"role": "user", "parts": [{"text": incoming_message}]})
+        # Add incoming message to history (ensure parts are Part objects)
+        # Note: "system" role messages are part of the prompt, not direct chat history turns.
+        # "user" role messages come from external (other Pi / human)
+        if role == "user":
+            self.chat_history.append(Content(role="user", parts=[Part(text=incoming_message_text)]))
             self.display_manager.display_message(
-                f"[{self.chat_partner_id}]: {incoming_message}\n\n[{self.pi_id}]: Thinking...",
+                f"[{self.chat_partner_id}]: {incoming_message_text}\n\n[{self.pi_id}]: Thinking...",
                 font_size=40
             )
+        elif role == "system_farewell": # Special role for controlled farewells
+             # This prompt is just for the LLM to generate a final message, not added to ongoing chat history as user/model turn.
+             pass
+
 
         # Construct the full prompt for the LLM, including history and instructions
+        # Ensure all parts are Part objects and roles are Content objects.
         messages_for_llm = [
-            {"role": "system", "parts": [
+            Content(role="system", parts=[Part(text=
                 f"You are an autonomous Raspberry Pi chatbot with ID '{self.pi_id}'. "
                 f"Your conversation partner is another autonomous Raspberry Pi chatbot with ID '{self.chat_partner_id}'. "
                 f"The current topic of discussion is: '{self.current_chat_topic}'. "
                 "Keep your responses concise and relevant to the topic. "
                 "Use the provided tools only when appropriate to display messages or send them to the other Pi."
-            ]}
+            )])
         ]
+        
+        # Extend with existing chat history (which should already contain Content/Part objects)
         messages_for_llm.extend(self.chat_history)
         
+        # Add the current incoming message if it's from the user (other Pi) or a system-initiated prompt
         if role == "user":
-             messages_for_llm.append({"role": "user", "parts": [{"text": incoming_message}]})
-        elif role == "system":
-             messages_for_llm.append({"role": "user", "parts": [{"text": incoming_message}]})
+             messages_for_llm.append(Content(role="user", parts=[Part(text=incoming_message_text)]))
+        elif role == "system": # For initial chat initiation (first prompt to LLM)
+             messages_for_llm.append(Content(role="user", parts=[Part(text=incoming_message_text)]))
+        elif role == "system_farewell": # For sending farewell message
+             messages_for_llm.append(Content(role="user", parts=[Part(text=incoming_message_text)]))
+
 
         # Call LLM with tools
-        mcp_tool_objects = await self.mcp_server_manager.mcp.list_tools() # Returns FastMCP's internal Tool objects
-
-        # --- CRITICAL FIX: Convert FastMCP.Tool objects into Gemini's expected FLAT list of FunctionDeclaration dictionaries ---
-        gemini_function_declarations_list = []
-        for mcp_tool_obj in mcp_tool_objects:
-            # Each mcp_tool_obj is a FastMCP.Tool instance.
-            # We construct a dictionary that matches Gemini's FunctionDeclaration schema.
-            func_decl_dict = {
-                "name": mcp_tool_obj.name,
-                "description": mcp_tool_obj.description,
-                "parameters": mcp_tool_obj.inputSchema # This should already be in the correct dict format
-            }
-            # Add a safeguard for uppercase types within parameters, if FastMCP provides them lowercase
-            if 'properties' in func_decl_dict['parameters']:
-                for prop_name, prop_details in func_decl_dict['parameters']['properties'].items():
-                    if 'type' in prop_details and isinstance(prop_details['type'], str):
-                        prop_details['type'] = prop_details['type'].upper()
-            if 'type' in func_decl_dict['parameters'] and isinstance(func_decl_dict['parameters']['type'], str):
-                func_decl_dict['parameters']['type'] = func_decl_dict['parameters']['type'].upper()
-
-            gemini_function_declarations_list.append(func_decl_dict)
-
-        # The 'tools' parameter in llm_interface.generate_response_with_tools
-        # (and by extension, GenerateContentConfig) expects this flat list of dictionaries directly.
-        final_tools_for_gemini_config = gemini_function_declarations_list
-        # --- END CRITICAL FIX ---
+        # Get the list of callable genai.tool functions from MCPServerManager
+        callable_genai_tools = self.mcp_server_manager.get_all_genai_callable_tools()
         
         try:
             response_content = await self.llm_interface.generate_response_with_tools(
-                messages=messages_for_llm,
-                tools=final_tools_for_gemini_config # Pass the correctly structured FLAT list of dicts
+                messages_history=messages_for_llm, # Pass the history as messages_history
+                tools=callable_genai_tools # Pass the list of callable functions directly
             )
             
             # Process LLM's response
@@ -297,25 +307,25 @@ class ChatPiApp:
                         if registered_tool_func:
                             tool_output = await registered_tool_func(**tool_args)
                             print(f"[{self.pi_id}] Tool '{tool_name}' executed. Output: {tool_output}")
-                            self.chat_history.append({
-                                "role": "function",
-                                "parts": [{"function_response": {"name": tool_name, "content": tool_output}}]
-                            })
+                            # Add tool output to history for next LLM turn
+                            self.chat_history.append(
+                                Content(role="function", parts=[Part(function_response={"name": tool_name, "content": tool_output})])
+                            )
                         else:
                             print(f"[{self.pi_id}] Error: LLM requested unknown tool: {tool_name}")
-                            self.chat_history.append({
-                                "role": "function",
-                                "parts": [{"function_response": {"name": tool_name, "content": f"Error: Unknown tool {tool_name}"}}]
-                            })
+                            self.chat_history.append(
+                                Content(role="function", parts=[Part(function_response={"name": tool_name, "content": f"Error: Unknown tool {tool_name}"})])
+                            )
                     
                     elif part.text:
                         print(f"[{self.pi_id}] LLM Text Response: {part.text[:50]}...")
-                        self.chat_history.append({"role": "model", "parts": [{"text": part.text}]})
+                        self.chat_history.append(Content(role="model", parts=[Part(text=part.text)]))
                         self.display_manager.display_message(
                             f"[{self.pi_id}]: {part.text}", font_size=40
                         )
             else:
                 print(f"[{self.pi_id}] LLM response had no text or tool calls.")
+                # This might happen if LLM hits safety filter.
                 self.display_manager.display_message(f"[{self.pi_id}] AI had no response or was blocked.", font_size=40)
 
 
@@ -324,23 +334,21 @@ class ChatPiApp:
             self.display_manager.display_message(f"[{self.pi_id}] Error: Something went wrong with AI.", font_size=40)
         finally:
             self.is_chatting_with_llm = False
-            self.chat_history = self.chat_history[-20:]
-
+            self.chat_history = self.chat_history[-20:] # Keep history manageable
 
     async def start(self):
         """Main entry point for the application."""
-        print(f"Starting ChatPiApp for Pi ID: {self.pi_id}")
+        print(f"[{self.pi_id}] Starting ChatPiApp...")
         self.display_manager.display_screensaver_text(f"Pi {self.pi_id} Booting...")
 
         # Connect MQTT client
         self.mqtt_client.connect()
-        self.mqtt_client.publish_status(is_online=True) # Announce online status
+        # Publish online status and set a Last Will and Testament for proper offline status
+        # Note: LWT is set in MQTTClient.__init__ typically, not on publish.
+        self.mqtt_client.publish_status(is_online=True) 
 
         # Start background tasks
         asyncio.create_task(self._process_incoming_messages()) # Process MQTT messages
-
-        # The MCP server runs as a separate component, its tools will be called by your LLM.
-        # It's not directly running in a loop here, but its methods are callable.
 
         # Initial mode entry
         await self.enter_idle_mode() # This will kick off the mode loop
@@ -356,36 +364,30 @@ class ChatPiApp:
 
 # --- Main execution block ---
 if __name__ == "__main__":
-    # Get PI_ID from command line arguments or environment variable
-    # python src/main.py pi1
-    # or export PI_ID=pi1 (on Linux) / $env:PI_ID="pi1" (on PowerShell)
-    if len(sys.argv) > 1:
+    # Get PI_ID from environment variable or command line arguments
+    # Prefer env var for deployment, then cmd arg for quick testing, then default.
+    current_pi_id = os.getenv("PI_ID", None)
+    if current_pi_id is None and len(sys.argv) > 1:
         current_pi_id = sys.argv[1]
-    else:
-        current_pi_id = os.getenv("PI_ID", "pi1") # Fallback if no arg and no env var
+    elif current_pi_id is None:
+        current_pi_id = "pi1" # Default if no env var and no cmd arg
 
-    # This is for testing on your Windows machine, so use localhost
-    # When deployed to Pi, your Pi will connect to the other Pi's Mosquitto broker
-    # if you chose to run it on one Pi. Or to a cloud broker.
-    # For now, if you ran mosquitto on pi1, use its IP.
-    # If running both main.py on same Windows machine, use localhost.
-    broker_ip_to_use = "127.0.0.1" # For testing both instances on your Windows PC
-    # Or, if Mosquitto is on Pi1 and this is Pi2's main.py, use Pi1's IP
-    # broker_ip_to_use = "YOUR_PI1_MOSQUITTO_IP_HERE"
+    print(f"Running application as Pi ID: {current_pi_id}")
 
     app = ChatPiApp(
         pi_id=current_pi_id,
-        broker_ip=BROKER_IP, # Use the configured BROKER_IP constant
+        broker_ip=BROKER_IP,
         mqtt_port=MQTT_PORT
     )
 
     try:
         # asyncio.run() runs the top-level async function until it completes.
-        # It also handles shutting down the event loop.
         asyncio.run(app.start())
     except KeyboardInterrupt:
-        print("\nCtrl+C detected. Shutting down application.")
+        print(f"\n[{current_pi_id}] Ctrl+C detected. Shutting down application gracefully.")
         asyncio.run(app.stop()) # Call stop method gracefully
     except Exception as e:
-        print(f"An unhandled error occurred: {e}")
+        print(f"[{current_pi_id}] An unhandled error occurred: {e}")
+        import traceback
+        traceback.print_exc() # Print full traceback for unhandled exceptions
         asyncio.run(app.stop()) # Attempt graceful shutdown

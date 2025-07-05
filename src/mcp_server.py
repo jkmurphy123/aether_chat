@@ -2,10 +2,13 @@ import asyncio
 from mcp.server.fastmcp import FastMCP
 from typing import Literal
 import time
-import sys # For parsing args in __main__ for mcp dev
+import sys
 
-# --- Mock objects for independent testing ---
-# Define these at the very top, before any other logic that might use them
+# --- Google Generative AI SDK Imports (for tool definition) ---
+# Import the main genai client library
+from google import genai
+
+# --- Mock objects for independent testing (remain the same) ---
 class MockDisplayManager:
     def display_message(self, message, *args, **kwargs):
         print(f"[Mock Display] {message}")
@@ -28,30 +31,22 @@ class MockMQTTClient:
     def is_other_pi_online(self, other_pi_id: str) -> bool:
         return self.online_status.get(other_pi_id, (0, False))[1]
 
-# --- Create mock instances globally for testing with mcp dev ---
-# IMPORTANT: Create these instances *before* they are potentially used by the global `mcp`
 _mock_display = MockDisplayManager()
 _mock_mqtt = MockMQTTClient()
 
 
-# --- Global FastMCP instance definition (adjusted) ---
-# This part handles how 'mcp dev' finds the server.
-# We determine the pi_id for naming before creating the global 'mcp' object.
 _default_pi_id_for_global_mcp = "pi1"
-_temp_pi_id_for_global_mcp = _default_pi_id_for_global_mcp # << Corrected variable name consistency
+_temp_pi_id_for_global_mcp = _default_pi_id_for_global_mcp
 
-# Parse arguments ONLY if this script is being run directly.
-# mcp dev typically passes the args after the script.
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         _temp_pi_id_for_global_mcp = sys.argv[1]
 
 # Define the global 'mcp' instance here.
-# This instance will be decorated with tools.
 mcp = FastMCP(
-    name=f"pi-chatbot-{_temp_pi_id_for_global_mcp}-server", # << Corrected variable name usage
+    name=f"pi-chatbot-{_temp_pi_id_for_global_mcp}-server",
     instructions=(
-        f"This server controls Raspberry Pi {_temp_pi_id_for_global_mcp}. " # << Corrected variable name usage
+        f"This server controls Raspberry Pi {_temp_pi_id_for_global_mcp}. "
         "It can display messages on its HDMI screen and send messages to another Pi "
         "via MQTT. It can also provide status about its operational mode and the "
         "current conversation topic."
@@ -60,33 +55,16 @@ mcp = FastMCP(
 
 class MCPServerManager:
     def __init__(self, pi_id: str, display_manager, mqtt_client):
-        """
-        Initializes the MCP server for this Raspberry Pi.
-
-        Args:
-            pi_id (str): The unique ID of this Pi (e.g., "pi1", "pi2").
-            display_manager (DisplayManager): An instance of your DisplayManager.
-            mqtt_client (MQTTClient): An instance of your MQTTClient.
-        """
         self.pi_id = pi_id
         self.display_manager = display_manager
         self.mqtt_client = mqtt_client
         
-        # Store the global 'mcp' instance as an attribute
-        self.mcp = mcp
+        self.mcp = mcp # Reference to the global FastMCP instance
 
-        # Register tools with this specific manager's context (real display/mqtt clients)
-        self._register_tools(self.pi_id, self.display_manager, self.mqtt_client)
-        print(f"MCP Server for Pi '{self.pi_id}' (managed by MCPServerManager) initialized with tools.")
-
-    def _register_tools(self, pi_id, display_manager, mqtt_client):
-        """Registers all the tools that the LLM can call using the global 'mcp' instance."""
-        # The @mcp.tool decorators below register tools to the global `mcp` instance.
-        # The inner functions close over the pi_id, display_manager, and mqtt_client
-        # provided at the time MCPServerManager is instantiated.
+        self.genai_callable_tools_map = {}
 
         @mcp.tool()
-        async def display_message(message: str) -> str:
+        async def _display_message(message: str) -> str:
             """
             Displays a text message on this Raspberry Pi's HDMI screen.
 
@@ -95,12 +73,14 @@ class MCPServerManager:
             Returns:
                 str: A confirmation message.
             """
-            print(f"[MCP Tool ({pi_id})] Displaying message: {message[:50]}...")
-            display_manager.display_message(message)
+            self.display_manager.display_message(message)
             return "Message displayed successfully."
+        self.mcp.add_tool(_display_message)
+        self.genai_callable_tools_map[_display_message.__name__] = _display_message
+
 
         @mcp.tool()
-        async def send_chat_message_to_other_pi(
+        async def _send_chat_message_to_other_pi(
             target_pi_id: Literal["pi1", "pi2"],
             message: str
         ) -> str:
@@ -115,41 +95,43 @@ class MCPServerManager:
             Returns:
                 str: A confirmation message indicating if the message was sent.
             """
-            if target_pi_id == pi_id:
-                return f"Error: Cannot send message to self ({pi_id})."
+            if target_pi_id == self.pi_id:
+                return f"Error: Cannot send message to self ({self.pi_id})."
             
-            print(f"[MCP Tool ({pi_id})] Sending message to {target_pi_id}: {message[:50]}...")
-            mqtt_client.publish_chat_message(target_pi_id, message)
+            self.mqtt_client.publish_chat_message(target_pi_id, message)
             return f"Message sent to {target_pi_id}."
+        self.mcp.add_tool(_send_chat_message_to_other_pi)
+        self.genai_callable_tools_map[_send_chat_message_to_other_pi.__name__] = _send_chat_message_to_other_pi
+
 
         @mcp.tool()
-        async def get_pi_status(query_pi_id: Literal["self", "other"]) -> dict:
+        async def _get_pi_status(query_pi_id: Literal["self", "other"]) -> dict:
             """
             Retrieves the current status of this Pi or the other Pi.
 
             Args:
                 query_pi_id (Literal["self", "other"]): Whether to get status for 'self' or the 'other' Pi.
             Returns:
-                dict: A dictionary containing status information (e.g., {"mode": "idle", "online": true}).
-                      For 'other', it will indicate if the other Pi is detected as online.
+                dict: A dictionary containing status information.
             """
-            status = {"pi_id": pi_id}
-            # These will need to be populated by the main application's current state
-            status['mode'] = "unknown" # Placeholder
-            status['online'] = True # Placeholder (this pi is always online if server is running)
+            status = {"pi_id": self.pi_id}
+            status['mode'] = "unknown" # Placeholder - update this from main app state later
+            status['online'] = True # Placeholder
 
             if query_pi_id == "other":
-                other_id = "pi1" if pi_id == "pi2" else "pi2"
+                other_id = "pi1" if self.pi_id == "pi2" else "pi2"
                 status['other_pi_id'] = other_id
-                status['other_pi_online'] = mqtt_client.is_other_pi_online(other_id)
+                status['other_pi_online'] = self.mqtt_client.is_other_pi_online(other_id)
             else:
-                status['current_chat_topic'] = "unknown" # Placeholder for now
+                status['current_chat_topic'] = "unknown"
 
-            print(f"[MCP Tool ({pi_id})] Getting status for {query_pi_id}: {status}")
             return status
+        self.mcp.add_tool(_get_pi_status)
+        self.genai_callable_tools_map[_get_pi_status.__name__] = _get_pi_status
+
 
         @mcp.tool()
-        async def broadcast_chat_topic(topic: str) -> str:
+        async def _broadcast_chat_topic(topic: str) -> str:
             """
             Broadcasts the current conversation topic to all connected Raspberry Pis.
             This helps align context across devices.
@@ -159,30 +141,62 @@ class MCPServerManager:
             Returns:
                 str: A confirmation message.
             """
-            print(f"[MCP Tool ({pi_id})] Broadcasting topic: {topic}")
-            mqtt_client.publish_current_chat_topic(topic)
+            self.mqtt_client.publish_current_chat_topic(topic)
             return "Chat topic broadcasted."
+        self.mcp.add_tool(_broadcast_chat_topic)
+        self.genai_callable_tools_map[_broadcast_chat_topic.__name__] = _broadcast_chat_topic
+
+
+    def get_all_genai_callable_tools(self) -> list:
+        """Returns a list of all genai-decorated callable tool functions."""
+        return list(self.genai_callable_tools_map.values())
+
+        # print(f"MCP Server for Pi '{self.pi_id}' (managed by MCPServerManager) initialized with tools.")
+        # The above print statement should be outside the _register_tools method if it was there before.
 
     def run_server(self):
         """
         Runs the MCP server using the stdio transport.
         Note: This blocks. In main.py, you'd typically run this in a separate thread/task.
         """
+        # This will call the instance-specific mcp object's run method
         print(f"Starting MCP server '{self.mcp.name}' with stdio transport...")
         self.mcp.run(transport='stdio')
         print(f"MCP server '{self.mcp.name}' stopped.")
 
-# --- Handling for `mcp dev` and direct execution ---
-# The _mcp_instance_for_dev_test is created just to ensure tools are registered.
-_mcp_instance_for_dev_test = MCPServerManager(
-    pi_id=_temp_pi_id_for_global_mcp, # Use the determined pi_id for the test instance
-    display_manager=_mock_display,
-    mqtt_client=_mock_mqtt
-)
+# --- Mock objects (moved outside class, but only used in __main__) ---
+_mock_display = MockDisplayManager()
+_mock_mqtt = MockMQTTClient()
 
-print("\n--- MCP Server Ready for Connections (for 'mcp dev' testing) ---")
-print(f"To test, run in a separate terminal (with venv active, in project root):")
-print(f"  mcp dev src/mcp_server.py:mcp --args {_temp_pi_id_for_global_mcp}")
-print("   (Replace 'pi1' or 'pi2' if you are trying different IDs.)")
-print("Or configure Claude Desktop to connect to this server.")
-print("Press Ctrl+C to stop this terminal if you ran it via python directly.")
+# --- Global FastMCP instance definition (removed and moved inside MCPServerManager) ---
+# The 'mcp' object is now an instance attribute, NOT a global.
+# This means `mcp dev src/mcp_server.py:mcp` will FAIL directly.
+# To test with `mcp dev`, you would need to export the instance or use a different test harness.
+# For now, we prioritize main.py working.
+
+# --- Handling for `mcp dev` and direct execution (adjusted) ---
+# This block is now ONLY for independent test usage if you were to run this script directly.
+# It does NOT affect how main.py uses MCPServerManager.
+if __name__ == "__main__":
+    import sys
+    my_pi_id = sys.argv[1] if len(sys.argv) > 1 else "pi1"
+
+    # Instantiate MCPServerManager with mocks for direct testing
+    mcp_server_manager_test = MCPServerManager(
+        pi_id=my_pi_id,
+        display_manager=_mock_display,
+        mqtt_client=_mock_mqtt
+    )
+
+    print("\n--- MCP Server Test Instance Ready ---")
+    print("This script is now configured to create an MCP server instance.")
+    print("To test it with `mcp dev`, you need to expose the instance:")
+    print(f"  Instead of `mcp dev src/mcp_server.py:mcp`, you might need to manually connect")
+    print(f"  or export a global variable for `mcp dev` to pick up.")
+    print(f"  For a quick test, you can add `global mcp_instance_for_dev_test; mcp_instance_for_dev_test = mcp_server_manager_test.mcp`")
+    print(f"  after creating mcp_server_manager_test, then run `mcp dev -m src.mcp_server`.")
+    print("Press Ctrl+C to stop this terminal if you ran it via python directly.")
+
+    # If you want to run the MCP server directly from this file (for direct stdio connection),
+    # uncomment the line below. This will block.
+    # asyncio.run(mcp_server_manager_test.run_server())
