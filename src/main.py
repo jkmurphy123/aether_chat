@@ -11,7 +11,6 @@ from .llm_interface import GeminiLLMInterface
 # Import the MCPServerManager class and the global 'mcp' object
 from .mcp_server import MCPServerManager, mcp 
 from google import genai
-from google.genai import Tool
 from google.genai.types import (
     GenerateContentConfig,
     FunctionCallingConfig,
@@ -253,10 +252,9 @@ class ChatPiApp:
              messages_for_llm.append({"role": "user", "parts": [{"text": incoming_message}]})
 
         # Call LLM with tools
-        mcp_tool_objects = await self.mcp_server_manager.mcp.list_tools() # This returns FastMCP's internal Tool objects
+        mcp_tool_objects = await self.mcp_server_manager.mcp.list_tools() # Returns FastMCP's internal Tool objects
 
-        # --- CRITICAL FIX: Convert FastMCP.Tool objects into Gemini's expected FunctionDeclaration dictionaries.
-        # This is the most direct and lowest-level conversion.
+        # --- CRITICAL FIX: Convert FastMCP.Tool objects into Gemini's expected FLAT list of FunctionDeclaration dictionaries ---
         gemini_function_declarations_list = []
         for mcp_tool_obj in mcp_tool_objects:
             # Each mcp_tool_obj is a FastMCP.Tool instance.
@@ -276,22 +274,15 @@ class ChatPiApp:
 
             gemini_function_declarations_list.append(func_decl_dict)
 
-        # Now, wrap this list of FunctionDeclaration dictionaries into a single 'Tool' object for Gemini.
-        # This 'Tool' object is a dictionary with the 'function_declarations' key.
-        # This is the specific structure expected by the 'tools' parameter in GenerateContentConfig.
-        
-        final_tools_for_gemini_config = []
-        if gemini_function_declarations_list: # Only add if there are actual tools
-            final_tools_for_gemini_config.append({
-                "function_declarations": gemini_function_declarations_list
-            })
-
+        # The 'tools' parameter in llm_interface.generate_response_with_tools
+        # (and by extension, GenerateContentConfig) expects this flat list of dictionaries directly.
+        final_tools_for_gemini_config = gemini_function_declarations_list
         # --- END CRITICAL FIX ---
         
         try:
             response_content = await self.llm_interface.generate_response_with_tools(
                 messages=messages_for_llm,
-                tools=final_tools_for_gemini_config # Pass the correctly structured list of tool dictionaries
+                tools=final_tools_for_gemini_config # Pass the correctly structured FLAT list of dicts
             )
             
             # Process LLM's response
