@@ -1,0 +1,3 @@
+.env
+.venv
+src/__pycache__/mcp_server.cpython-310.pyc
