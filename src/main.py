@@ -10,6 +10,17 @@ from .mqtt_client import MQTTClient
 from .llm_interface import GeminiLLMInterface
 # Import the MCPServerManager class and the global 'mcp' object
 from .mcp_server import MCPServerManager, mcp 
+from google import genai
+from google.genai import Tool
+from google.genai.types import (
+    GenerateContentConfig,
+    FunctionCallingConfig,
+    HarmCategory,
+    HarmBlockThreshold,
+    Content, # Re-import Content if not already
+    Part     # Re-import Part if not already
+)
+
 
 # --- Configuration Constants ---
 # You can define these in a separate config.py or use environment variables
@@ -215,16 +226,14 @@ class ChatPiApp:
         self.display_manager.display_message(f"[{self.pi_id}] Thinking...", font_size=40)
 
         # Add incoming message to history
-        if role == "system": # For initial system prompt, don't add to general history
+        if role == "system":
             pass
         elif role == "user":
             self.chat_history.append({"role": "user", "parts": [{"text": incoming_message}]})
-            # Display incoming message from other Pi
             self.display_manager.display_message(
                 f"[{self.chat_partner_id}]: {incoming_message}\n\n[{self.pi_id}]: Thinking...",
                 font_size=40
             )
-
 
         # Construct the full prompt for the LLM, including history and instructions
         messages_for_llm = [
@@ -238,62 +247,94 @@ class ChatPiApp:
         ]
         messages_for_llm.extend(self.chat_history)
         
-        # Add the current incoming message if it's from the user (other Pi)
         if role == "user":
              messages_for_llm.append({"role": "user", "parts": [{"text": incoming_message}]})
-        elif role == "system": # If it's an internal system prompt for initiation
-             messages_for_llm.append({"role": "user", "parts": [{"text": incoming_message}]}) # Treat as a user prompt to the LLM
+        elif role == "system":
+             messages_for_llm.append({"role": "user", "parts": [{"text": incoming_message}]})
 
         # Call LLM with tools
-        tools = self.mcp_server_manager.mcp.get_tools() # Get tool definitions from MCP server
+        mcp_tool_objects = await self.mcp_server_manager.mcp.list_tools() # This returns FastMCP's internal Tool objects
+
+        # --- CRITICAL FIX: Convert FastMCP.Tool objects into Gemini's expected FunctionDeclaration dictionaries.
+        # This is the most direct and lowest-level conversion.
+        gemini_function_declarations_list = []
+        for mcp_tool_obj in mcp_tool_objects:
+            # Each mcp_tool_obj is a FastMCP.Tool instance.
+            # We construct a dictionary that matches Gemini's FunctionDeclaration schema.
+            func_decl_dict = {
+                "name": mcp_tool_obj.name,
+                "description": mcp_tool_obj.description,
+                "parameters": mcp_tool_obj.inputSchema # This should already be in the correct dict format
+            }
+            # Add a safeguard for uppercase types within parameters, if FastMCP provides them lowercase
+            if 'properties' in func_decl_dict['parameters']:
+                for prop_name, prop_details in func_decl_dict['parameters']['properties'].items():
+                    if 'type' in prop_details and isinstance(prop_details['type'], str):
+                        prop_details['type'] = prop_details['type'].upper()
+            if 'type' in func_decl_dict['parameters'] and isinstance(func_decl_dict['parameters']['type'], str):
+                func_decl_dict['parameters']['type'] = func_decl_dict['parameters']['type'].upper()
+
+            gemini_function_declarations_list.append(func_decl_dict)
+
+        # Now, wrap this list of FunctionDeclaration dictionaries into a single 'Tool' object for Gemini.
+        # This 'Tool' object is a dictionary with the 'function_declarations' key.
+        # This is the specific structure expected by the 'tools' parameter in GenerateContentConfig.
+        
+        final_tools_for_gemini_config = []
+        if gemini_function_declarations_list: # Only add if there are actual tools
+            final_tools_for_gemini_config.append({
+                "function_declarations": gemini_function_declarations_list
+            })
+
+        # --- END CRITICAL FIX ---
         
         try:
-            response = await self.llm_interface.generate_response_with_tools(
-                messages_for_llm,
-                tools=tools # Pass tool definitions to LLM
+            response_content = await self.llm_interface.generate_response_with_tools(
+                messages=messages_for_llm,
+                tools=final_tools_for_gemini_config # Pass the correctly structured list of tool dictionaries
             )
             
             # Process LLM's response
-            if response.tool_calls:
-                # If the LLM wants to call a tool
-                for tool_call in response.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = tool_call.function.args
-                    print(f"[{self.pi_id}] LLM requested tool call: {tool_name} with args {tool_args}")
+            if response_content and response_content.parts:
+                for part in response_content.parts:
+                    if part.function_call:
+                        tool_name = part.function_call.name
+                        tool_args = part.function_call.args
+                        print(f"[{self.pi_id}] LLM requested tool call: {tool_name} with args {tool_args}")
+                        
+                        registered_tool_func = self.mcp_server_manager.mcp.get_tool_function(tool_name)
+                        if registered_tool_func:
+                            tool_output = await registered_tool_func(**tool_args)
+                            print(f"[{self.pi_id}] Tool '{tool_name}' executed. Output: {tool_output}")
+                            self.chat_history.append({
+                                "role": "function",
+                                "parts": [{"function_response": {"name": tool_name, "content": tool_output}}]
+                            })
+                        else:
+                            print(f"[{self.pi_id}] Error: LLM requested unknown tool: {tool_name}")
+                            self.chat_history.append({
+                                "role": "function",
+                                "parts": [{"function_response": {"name": tool_name, "content": f"Error: Unknown tool {tool_name}"}}]
+                            })
                     
-                    # Execute the tool via MCP server directly (this bypasses the external client for direct action)
-                    # For a true MCP client interaction, an external agent would execute this.
-                    # Here, the MainApp acts as the executor for its own LLM's tool calls.
-                    # We need to map tool_name to the actual function.
-                    
-                    # Find the tool function from the mcp server's registered tools
-                    registered_tool_func = self.mcp_server_manager.mcp.get_tool_function(tool_name)
-                    if registered_tool_func:
-                        tool_output = await registered_tool_func(**tool_args)
-                        print(f"[{self.pi_id}] Tool '{tool_name}' executed. Output: {tool_output}")
-                        # Add tool output to history for next LLM turn
-                        self.chat_history.append({"role": "tool", "tool_call_id": tool_call.id, "content": tool_output})
-                    else:
-                        print(f"[{self.pi_id}] Error: LLM requested unknown tool: {tool_name}")
-                        # Add an error message to history
-                        self.chat_history.append({"role": "tool", "tool_call_id": tool_call.id, "content": f"Error: Unknown tool {tool_name}"})
-            
-            if response.text:
-                # If the LLM generates text (even in addition to tool calls)
-                print(f"[{self.pi_id}] LLM Text Response: {response.text[:50]}...")
-                self.chat_history.append({"role": "model", "parts": [{"text": response.text}]})
-                # Display the LLM's text response
-                self.display_manager.display_message(
-                    f"[{self.chat_partner_id}]: {incoming_message if role == 'user' else ''}\n\n" # Show original message if it was from other pi
-                    f"[{self.pi_id}]: {response.text}", font_size=40
-                )
+                    elif part.text:
+                        print(f"[{self.pi_id}] LLM Text Response: {part.text[:50]}...")
+                        self.chat_history.append({"role": "model", "parts": [{"text": part.text}]})
+                        self.display_manager.display_message(
+                            f"[{self.pi_id}]: {part.text}", font_size=40
+                        )
+            else:
+                print(f"[{self.pi_id}] LLM response had no text or tool calls.")
+                self.display_manager.display_message(f"[{self.pi_id}] AI had no response or was blocked.", font_size=40)
+
 
         except Exception as e:
             print(f"[{self.pi_id}] Error during chat turn: {e}")
             self.display_manager.display_message(f"[{self.pi_id}] Error: Something went wrong with AI.", font_size=40)
         finally:
-            self.is_chatting_with_llm = False # Release LLM for next turn
-            self.chat_history = self.chat_history[-20:] # Keep chat history to last N turns to avoid token limits
+            self.is_chatting_with_llm = False
+            self.chat_history = self.chat_history[-20:]
+
 
     async def start(self):
         """Main entry point for the application."""

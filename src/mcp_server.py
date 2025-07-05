@@ -4,7 +4,8 @@ from typing import Literal
 import time
 import sys # For parsing args in __main__ for mcp dev
 
-# --- Mock objects for independent testing (remain the same) ---
+# --- Mock objects for independent testing ---
+# Define these at the very top, before any other logic that might use them
 class MockDisplayManager:
     def display_message(self, message, *args, **kwargs):
         print(f"[Mock Display] {message}")
@@ -27,12 +28,17 @@ class MockMQTTClient:
     def is_other_pi_online(self, other_pi_id: str) -> bool:
         return self.online_status.get(other_pi_id, (0, False))[1]
 
+# --- Create mock instances globally for testing with mcp dev ---
+# IMPORTANT: Create these instances *before* they are potentially used by the global `mcp`
+_mock_display = MockDisplayManager()
+_mock_mqtt = MockMQTTClient()
+
+
 # --- Global FastMCP instance definition (adjusted) ---
 # This part handles how 'mcp dev' finds the server.
-# The 'mcp' object is created here and will be passed into MCPServerManager.
 # We determine the pi_id for naming before creating the global 'mcp' object.
 _default_pi_id_for_global_mcp = "pi1"
-_temp_pi_id_for_global_mcp = _default_pi_id_for_global_mcp
+_temp_pi_id_for_global_mcp = _default_pi_id_for_global_mcp # << Corrected variable name consistency
 
 # Parse arguments ONLY if this script is being run directly.
 # mcp dev typically passes the args after the script.
@@ -43,9 +49,9 @@ if __name__ == "__main__":
 # Define the global 'mcp' instance here.
 # This instance will be decorated with tools.
 mcp = FastMCP(
-    name=f"pi-chatbot-{_temp_pi_id_for_global_mcp}-server",
+    name=f"pi-chatbot-{_temp_pi_id_for_global_mcp}-server", # << Corrected variable name usage
     instructions=(
-        f"This server controls Raspberry Pi {_temp_pi_id_for_global_mcp}. "
+        f"This server controls Raspberry Pi {_temp_pi_id_for_global_mcp}. " # << Corrected variable name usage
         "It can display messages on its HDMI screen and send messages to another Pi "
         "via MQTT. It can also provide status about its operational mode and the "
         "current conversation topic."
@@ -66,14 +72,10 @@ class MCPServerManager:
         self.display_manager = display_manager
         self.mqtt_client = mqtt_client
         
-        # --- CRITICAL FIX: Store the global 'mcp' instance as an attribute ---
+        # Store the global 'mcp' instance as an attribute
         self.mcp = mcp
-        # --- END CRITICAL FIX ---
 
         # Register tools with this specific manager's context (real display/mqtt clients)
-        # Note: The @mcp.tool decorator already registers with the global `mcp` instance.
-        # This call primarily sets up the closures for the tools with the correct
-        # display_manager and mqtt_client instances that are passed to this constructor.
         self._register_tools(self.pi_id, self.display_manager, self.mqtt_client)
         print(f"MCP Server for Pi '{self.pi_id}' (managed by MCPServerManager) initialized with tools.")
 
@@ -170,12 +172,10 @@ class MCPServerManager:
         self.mcp.run(transport='stdio')
         print(f"MCP server '{self.mcp.name}' stopped.")
 
-# --- Handling for `mcp dev` and direct execution (remains the same) ---
-# This block ensures the global 'mcp' instance is created correctly
-# when the file is imported by `mcp dev` or run directly.
+# --- Handling for `mcp dev` and direct execution ---
 # The _mcp_instance_for_dev_test is created just to ensure tools are registered.
 _mcp_instance_for_dev_test = MCPServerManager(
-    pi_id=_temp_pi_id_for_global_mcp,
+    pi_id=_temp_pi_id_for_global_mcp, # Use the determined pi_id for the test instance
     display_manager=_mock_display,
     mqtt_client=_mock_mqtt
 )
