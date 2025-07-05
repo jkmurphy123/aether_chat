@@ -33,11 +33,11 @@ elif THIS_PI_ID is None:
 
 IDLE_MODE_MIN_DURATION_SEC = 30   # Reduced for quicker testing (originally 300)
 IDLE_MODE_MAX_DURATION_SEC = 60   # Reduced for quicker testing (originally 1800)
-CHAT_MODE_MIN_DURATION_SEC = 20   # Reduced for quicker testing (originally 60)
-CHAT_MODE_MAX_DURATION_SEC = 60   # Reduced for quicker testing (originally 600)
+CHAT_MODE_MIN_DURATION_SEC = 60   # Reduced for quicker testing (originally 60)
+CHAT_MODE_MAX_DURATION_SEC = 180   # Reduced for quicker testing (originally 600)
 
 # Timeout for other Pi's status to be considered online (heartbeat interval is 5s)
-OTHER_PI_STATUS_TIMEOUT_SEC = 20 # If no heartbeat for 20s, assume offline (originally 120)
+OTHER_PI_STATUS_TIMEOUT_SEC = 120 # If no heartbeat for 20s, assume offline (originally 120)
 
 # Predefined screensaver messages (you can make this more dynamic later)
 SCREENSAVER_MESSAGES = [
@@ -247,38 +247,30 @@ class ChatPiApp:
         self.is_chatting_with_llm = True
         self.display_manager.display_message(f"[{self.pi_id}] Thinking...", font_size=40)
 
-        # Add incoming message to history (ensure parts are Part objects)
-        # Note: "system" role messages are part of the prompt, not direct chat history turns.
-        # "user" role messages come from external (other Pi / human)
-        if role == "user":
-            self.chat_history.append(Content(role="user", parts=[Part(text=incoming_message_text)]))
-            self.display_manager.display_message(
-                f"[{self.chat_partner_id}]: {incoming_message_text}\n\n[{self.pi_id}]: Thinking...",
-                font_size=40
-            )
-        elif role == "system_farewell": # Special role for controlled farewells
-             # This prompt is just for the LLM to generate a final message, not added to ongoing chat history as user/model turn.
-             pass
-
-
-        # Construct the full prompt for the LLM, including history and instructions
-        # Ensure all parts are Part objects and roles are Content objects.
-        messages_for_llm = [
-            Content(role="system", parts=[Part(text=
-                f"You are an autonomous Raspberry Pi chatbot with ID '{self.pi_id}'. "
-                f"Your conversation partner is another autonomous Raspberry Pi chatbot with ID '{self.chat_partner_id}'. "
-                f"The current topic of discussion is: '{self.current_chat_topic}'. "
-                "Keep your responses concise and relevant to the topic. "
-                "Use the provided tools only when appropriate to display messages or send them to the other Pi."
-            )])
-        ]
+        # Build messages for LLM
+        messages_for_llm = []
         
-        # Extend with existing chat history (which should already contain Content/Part objects)
+        # --- System Instruction is now a separate parameter in generate_response_with_tools ---
+        system_instruction_text = (
+            f"You are an autonomous Raspberry Pi chatbot with ID '{self.pi_id}'. "
+            f"Your conversation partner is another autonomous Raspberry Pi chatbot with ID '{self.chat_partner_id}'. "
+            f"The current topic of discussion is: '{self.current_chat_topic}'. "
+            "Keep your responses concise and relevant to the topic. "
+            "Use the provided tools only when appropriate to display messages or send them to the other Pi."
+        )
+        # --- END System Instruction ---
+        
+        # Add historical chat turns
         messages_for_llm.extend(self.chat_history)
         
         # Add the current incoming message if it's from the user (other Pi) or a system-initiated prompt
         if role == "user":
              messages_for_llm.append(Content(role="user", parts=[Part(text=incoming_message_text)]))
+             # Display incoming message from other Pi on screen
+             self.display_manager.display_message(
+                f"[{self.chat_partner_id}]: {incoming_message_text}\n\n[{self.pi_id}]: Thinking...",
+                font_size=40
+            )
         elif role == "system": # For initial chat initiation (first prompt to LLM)
              messages_for_llm.append(Content(role="user", parts=[Part(text=incoming_message_text)]))
         elif role == "system_farewell": # For sending farewell message
@@ -286,13 +278,13 @@ class ChatPiApp:
 
 
         # Call LLM with tools
-        # Get the list of callable genai.tool functions from MCPServerManager
         callable_genai_tools = self.mcp_server_manager.get_all_genai_callable_tools()
         
         try:
             response_content = await self.llm_interface.generate_response_with_tools(
-                messages_history=messages_for_llm, # Pass the history as messages_history
-                tools=callable_genai_tools # Pass the list of callable functions directly
+                messages_history=messages_for_llm,
+                tools=callable_genai_tools, # Pass the list of callable functions directly
+                system_instruction=system_instruction_text # Pass system instruction as separate arg
             )
             
             # Process LLM's response
@@ -307,7 +299,6 @@ class ChatPiApp:
                         if registered_tool_func:
                             tool_output = await registered_tool_func(**tool_args)
                             print(f"[{self.pi_id}] Tool '{tool_name}' executed. Output: {tool_output}")
-                            # Add tool output to history for next LLM turn
                             self.chat_history.append(
                                 Content(role="function", parts=[Part(function_response={"name": tool_name, "content": tool_output})])
                             )
@@ -325,16 +316,17 @@ class ChatPiApp:
                         )
             else:
                 print(f"[{self.pi_id}] LLM response had no text or tool calls.")
-                # This might happen if LLM hits safety filter.
                 self.display_manager.display_message(f"[{self.pi_id}] AI had no response or was blocked.", font_size=40)
 
 
         except Exception as e:
             print(f"[{self.pi_id}] Error during chat turn: {e}")
+            import traceback
+            traceback.print_exc() # Print full traceback for errors in chat turn
             self.display_manager.display_message(f"[{self.pi_id}] Error: Something went wrong with AI.", font_size=40)
         finally:
             self.is_chatting_with_llm = False
-            self.chat_history = self.chat_history[-20:] # Keep history manageable
+            self.chat_history = self.chat_history[-20:]
 
     async def start(self):
         """Main entry point for the application."""

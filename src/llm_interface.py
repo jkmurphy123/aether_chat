@@ -25,7 +25,7 @@ class GeminiLLMInterface:
         self.client = genai.Client(api_key=api_key)
         self.model_name = 'gemini-2.0-flash-001' # Or 'gemini-1.5-flash' or 'gemini-2.0-flash-001'
 
-    async def generate_response_with_tools(self, messages_history: list, tools: list):
+    async def generate_response_with_tools(self, messages_history: list, tools: list, system_instruction: str = None):
         """
         Generates a response from the Gemini model, optionally using provided tools.
 
@@ -41,17 +41,23 @@ class GeminiLLMInterface:
             # The 'tools' parameter in GenerateContentConfig expects a FLAT LIST of FunctionDeclaration dictionaries.
             # This is the most important part we've been debugging.
             
+            # It expects a Content object, so convert the string instruction to Content(parts=[Part(text=...)])
+            system_instruction_content = None
+            if system_instruction:
+                system_instruction_content = Content(parts=[Part(text=system_instruction)])
+                            
             config_obj = GenerateContentConfig(
                 tools=tools, # Pass the flat list of FunctionDeclaration dictionaries directly here
                 tool_config=FunctionCallingConfig(mode="AUTO"), # Pass FunctionCallingConfig object
+                system_instruction=system_instruction_content, # Pass the system instruction here
                 # Other generation parameters can go here (e.g., temperature, max_output_tokens)
             )
             
             safety_settings_list = [
-                {"category": HarmCategory.HAR_CATEGORY_HARASSMENT, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
-                {"category": HarmCategory.HAR_CATEGORY_HATE_SPEECH, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
-                {"category": HarmCategory.HAR_CATEGORY_SEXUALLY_EXPLICIT, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
-                {"category": HarmCategory.HAR_CATEGORY_DANGEROUS_CONTENT, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
+                {"category": HarmCategory.HARM_CATEGORY_HARASSMENT, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
+                {"category": HarmCategory.HARM_CATEGORY_HATE_SPEECH, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
+                {"category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
+                {"category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
             ]
 
             # Now call generate_content with 'config' and 'safety_settings' as top-level arguments
@@ -59,8 +65,8 @@ class GeminiLLMInterface:
                 model=self.model_name,
                 contents=messages_history,
                 config=config_obj, # Pass the GenerateContentConfig object as 'config'
-                safety_settings=safety_settings_list, # Pass safety settings list directly here
-                stream=False # Stream is a direct parameter to generate_content
+                #safety_settings=safety_settings_list, # Pass safety settings list directly here
+                #stream=False # Stream is a direct parameter to generate_content
             )
             # --- END CRITICAL FIX ---
             
