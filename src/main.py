@@ -39,6 +39,8 @@ CHAT_MODE_MAX_DURATION_SEC = 600   # Reduced for quicker testing (originally 600
 # Timeout for other Pi's status to be considered online (heartbeat interval is 5s)
 OTHER_PI_STATUS_TIMEOUT_SEC = 120 # If no heartbeat for 20s, assume offline (originally 120)
 
+MESSAGE_DISPLAY_DELAY_SEC = 20 
+
 # Predefined screensaver messages (you can make this more dynamic later)
 SCREENSAVER_MESSAGES = [
     "Awaiting inspiration...",
@@ -315,6 +317,7 @@ class ChatPiApp:
                         self.display_manager.display_message(
                             f"[{self.pi_id}]: {part.text}", font_size=40
                         )
+                        await asyncio.sleep(MESSAGE_DISPLAY_DELAY_SEC) # Delay here                       
             else:
                 print(f"[{self.pi_id}] LLM response had no text or tool calls.")
                 self.display_manager.display_message(f"[{self.pi_id}] AI had no response or was blocked.", font_size=40)
