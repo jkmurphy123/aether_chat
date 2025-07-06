@@ -5,7 +5,7 @@ import threading # For running the MQTT loop in a separate thread
 import random    # For generating a unique client ID
 
 class MQTTClient:
-    def __init__(self, broker_ip: str, port: int, pi_id: str, message_callback):
+    def __init__(self, broker_ip: str, port: int, pi_id: str, message_callback, maintain_heartbeat):
         """
         Initializes the MQTT client.
 
@@ -20,6 +20,7 @@ class MQTTClient:
         self.port = port
         self.pi_id = pi_id
         self.message_callback = message_callback # This will be a method in your main app
+        self.maintain_heartbeat = maintain_heartbeat
 
         # Generate a unique client ID. MQTT client IDs must be unique per broker.
         self.client_id = f"pi_chatbot_{self.pi_id}_{random.randint(1000, 9999)}"

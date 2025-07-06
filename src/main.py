@@ -73,7 +73,8 @@ class ChatPiApp:
             broker_ip=self.broker_ip,
             port=self.mqtt_port,
             pi_id=self.pi_id,
-            message_callback=self._handle_incoming_chat_message # This links MQTT to main app
+            message_callback=self._handle_incoming_chat_message,  # Links MQTT to main app
+            maintain_heartbeat=True # Add this flag.  You'll implement in MQTTClient.
         )
         self.llm_interface = GeminiLLMInterface()
 
@@ -292,6 +293,7 @@ class ChatPiApp:
             # Process LLM's response
             if response_content and response_content.parts:
                 for part in response_content.parts:
+                    print(f"test: {part}")
                     if part.function_call:
                         tool_name = part.function_call.name
                         tool_args = part.function_call.args
@@ -312,7 +314,7 @@ class ChatPiApp:
                             )
                     
                     elif part.text:
-                        print(f"[{self.pi_id}] LLM Text Response: {part.text[:50]}...")
+                        print(f"[{self.pi_id}] LLM Text Response (main.py): {part.text[:50]}...")
                         self.chat_history.append(Content(role="model", parts=[Part(text=part.text)]))
                         self.display_manager.display_message(
                             f"[{self.pi_id}]: {part.text}", font_size=40
